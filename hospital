@@ -1,0 +1,202 @@
+// Hospital Management System
+// Database: SQLite3
+// Password storage: PBKDF2-HMAC-SHA256 with a random salt (OpenSSL)
+// Compile (Linux): g++ hospital.cpp -o hospital -lsqlite3 -lcrypto
+// Compile (Windows): configure SQLite3 and OpenSSL include/library paths in your compiler.
+
+#include <iostream>
+#include <string>
+#include <limits>
+#include <stdexcept>
+#include <sqlite3.h>
+#include <openssl/evp.h>
+#include <openssl/rand.h>
+
+using namespace std;
+
+class Database {
+    sqlite3* db = nullptr;
+
+    void execute(const string& sql) {
+        char* error = nullptr;
+        if (sqlite3_exec(db, sql.c_str(), nullptr, nullptr, &error) != SQLITE_OK) {
+            string message = error ? error : "Database error";
+            sqlite3_free(error);
+            throw runtime_error(message);
+        }
+    }
+
+    static string toHex(const unsigned char* data, int length) {
+        static const char digits[] = "0123456789abcdef";
+        string result;
+        for (int i = 0; i < length; ++i) {
+            result += digits[data[i] >> 4];
+            result += digits[data[i] & 0x0F];
+        }
+        return result;
+    }
+
+    static bool fromHex(const string& hex, unsigned char* output, int outputLength) {
+        if (hex.size() != static_cast<size_t>(outputLength * 2)) return false;
+        auto value = [](char c) -> int {
+            if (c >= '0' && c <= '9') return c - '0';
+            if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+            if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+            return -1;
+        };
+        for (int i = 0; i < outputLength; ++i) {
+            int hi = value(hex[i * 2]), lo = value(hex[i * 2 + 1]);
+            if (hi < 0 || lo < 0) return false;
+            output[i] = static_cast<unsigned char>((hi << 4) | lo);
+        }
+        return true;
+    }
+
+    static void createPasswordHash(const string& password, string& saltHex, string& hashHex) {
+        unsigned char salt[16];
+        unsigned char hash[32];
+        if (RAND_bytes(salt, sizeof(salt)) != 1)
+            throw runtime_error("Could not generate password salt.");
+        if (PKCS5_PBKDF2_HMAC(password.c_str(), static_cast<int>(password.size()),
+                              salt, sizeof(salt), 200000, EVP_sha256(),
+                              sizeof(hash), hash) != 1)
+            throw runtime_error("Password hashing failed.");
+        saltHex = toHex(salt, sizeof(salt));
+        hashHex = toHex(hash, sizeof(hash));
+    }
+
+    static bool verifyPassword(const string& password, const string& saltHex,
+                               const string& expectedHashHex) {
+        unsigned char salt[16], expected[32], actual[32];
+        if (!fromHex(saltHex, salt, sizeof(salt)) ||
+            !fromHex(expectedHashHex, expected, sizeof(expected))) return false;
+        if (PKCS5_PBKDF2_HMAC(password.c_str(), static_cast<int>(password.size()),
+                              salt, sizeof(salt), 200000, EVP_sha256(),
+                              sizeof(actual), actual) != 1) return false;
+        // Constant-time comparison.
+        unsigned char difference = 0;
+        for (size_t i = 0; i < sizeof(actual); ++i)
+            difference |= actual[i] ^ expected[i];
+        return difference == 0;
+    }
+
+    void seedUser(const string& username, const string& password,
+                  const string& role, int patientId = 0) {
+        sqlite3_stmt* stmt = nullptr;
+        sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM users WHERE username=?;", -1, &stmt, nullptr);
+        sqlite3_bind_text(stmt, 1, username.c_str(), -1, SQLITE_TRANSIENT);
+        bool exists = sqlite3_step(stmt) == SQLITE_ROW && sqlite3_column_int(stmt, 0) > 0;
+        sqlite3_finalize(stmt);
+        if (exists) return;
+
+        string salt, hash;
+        createPasswordHash(password, salt, hash);
+        sqlite3_prepare_v2(db,
+            "INSERT INTO users(username,password_hash,salt,role,patient_id) VALUES(?,?,?,?,?);",
+            -1, &stmt, nullptr);
+            else if (choice == 5) db.displayPatients(readInt("Patient ID: "));
+            else if (choice == 6) db.searchPatientByName(readLine("Patient name: "));
+            else if (choice == 7) {
+                string name = readLine("Doctor name: ");
+                int age = readInt("Age: ");
+                string phone = readLine("Phone: ");
+                string spec = readLine("Specialization: ");
+                if (name.empty() || age <= 0) throw invalid_argument("Invalid doctor details.");
+                db.addDoctor(name, age, phone, spec);
+            } else if (choice == 8) db.displayDoctors();
+            else if (choice == 9) {
+                int id = readInt("Doctor ID: ");
+                string name = readLine("New name: ");
+                int age = readInt("New age: ");
+                string phone = readLine("New phone: ");
+                string spec = readLine("New specialization: ");
+                if (age <= 0) throw invalid_argument("Age must be positive.");
+                db.updateDoctor(id, name, age, phone, spec);
+            } else if (choice == 10) db.deleteDoctor(readInt("Doctor ID to delete: "));
+            else if (choice == 11) db.displayAppointments();
+            else if (choice == 12) {
+                int consultation = readInt("Consultation fee: ");
+                int medicine = readInt("Medicine fee: ");
+                if (consultation < 0 || medicine < 0) throw invalid_argument("Fees cannot be negative.");
+                cout << "Consultation Fee: Rs. " << consultation
+                     << "\nMedicine Fee: Rs. " << medicine
+                     << "\nTotal Amount: Rs. " << consultation + medicine << "\n";
+            } else if (choice != 0) cout << "Invalid choice.\n";
+        } catch (const exception& e) { cout << "Error: " << e.what() << "\n"; }
+    } while (choice != 0);
+}
+
+void doctorMenu(Database& db) {
+    int choice;
+    do {
+        cout << "\n===== DOCTOR MENU ====="
+             << "\n1. View All Patients\n2. Search Patient by ID"
+             << "\n3. Search Patient by Name\n4. Update Medical Details"
+             << "\n5. View Appointments\n0. Logout\n";
+        choice = readInt("Enter choice: ");
+        if (choice == 1) db.displayPatients();
+        else if (choice == 2) db.displayPatients(readInt("Patient ID: "));
+        else if (choice == 3) db.searchPatientByName(readLine("Patient name: "));
+        else if (choice == 4) {
+            int id = readInt("Patient ID: ");
+            string disease = readLine("Updated medical condition: ");
+            db.updateDisease(id, disease);
+        } else if (choice == 5) db.displayAppointments();
+        else if (choice != 0) cout << "Invalid choice.\n";
+    } while (choice != 0);
+}
+
+void patientMenu(Database& db, int patientId) {
+    int choice;
+    do {
+        cout << "\n===== PATIENT MENU ====="
+             << "\n1. View My Profile\n2. Book Appointment"
+             << "\n3. View My Appointments\n0. Logout\n";
+        choice = readInt("Enter choice: ");
+        if (choice == 1) db.displayPatients(patientId);
+        else if (choice == 2) {
+            db.displayDoctors();
+            int doctorId = readInt("Doctor ID: ");
+            string date = readLine("Appointment date (e.g. 20-11-2026): ");
+            string time = readLine("Appointment time (e.g. 10:30 AM): ");
+            db.bookAppointment(patientId, doctorId, date, time);
+        } else if (choice == 3) db.displayAppointments(patientId);
+        else if (choice != 0) cout << "Invalid choice.\n";
+    } while (choice != 0);
+}
+
+void login(Database& db) {
+    string username = readLine("Username: ");
+    string password = readLine("Password: ");
+    string role;
+    int patientId = 0;
+    if (!db.authenticate(username, password, role, patientId)) {
+        cout << "Invalid username or password.\n";
+        return;
+    }
+    cout << "Login successful. Role: " << role << "\n";
+    if (role == "admin") adminMenu(db);
+    else if (role == "doctor") doctorMenu(db);
+    else if (role == "patient") patientMenu(db, patientId);
+}
+
+int main() {
+    try {
+        Database db;
+        int choice;
+        do {
+            cout << "\n===================================="
+                 << "\n       HOSPITAL MANAGEMENT SYSTEM"
+                 << "\n===================================="
+                 << "\n1. Login\n0. Exit\n";
+            choice = readInt("Enter choice: ");
+            if (choice == 1) login(db);
+            else if (choice == 0) cout << "Thank you for using the system.\n";
+            else cout << "Invalid choice.\n";
+        } while (choice != 0);
+    } catch (const exception& e) {
+        cerr << "Fatal error: " << e.what() << "\n";
+        return 1;
+    }
+    return 0;
+}
